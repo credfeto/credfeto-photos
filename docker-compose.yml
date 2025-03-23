@@ -84,5 +84,21 @@ services:
       -c wal_compression=on
     restart: always
 
+  immich-nginx:
+    image: nginx:stable-alpine
+    container_name: immich-nginx
+    restart: always
+    stop_grace_period: 5s
+    stop_signal: SIGINT
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:r
+      - ./certs:/etc/nginx/ssl:r
+    ports:
+      - 2284:443/tcp
+
+    depends_on:
+      immich-server:
+        condition: service_started
+
 volumes:
   model-cache:

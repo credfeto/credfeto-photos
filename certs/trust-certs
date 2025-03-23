@@ -1,0 +1,4 @@
+#! /bin/sh
+
+sudo trust anchor --store ./photos.local.pem
+
