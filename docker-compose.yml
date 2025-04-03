@@ -21,8 +21,8 @@ services:
       - /etc/localtime:/etc/localtime:ro
     env_file:
       - .env
-#    ports:
-#      - '2283:2283'
+    ports:
+      - '2283:2283'
     depends_on:
       - redis
       - database
@@ -94,7 +94,7 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:r
       - ./certs:/etc/nginx/ssl:r
     ports:
-      - 2283:80/tcp
+      #- 2283:80/tcp
       - 2284:443/tcp
 
     depends_on:
