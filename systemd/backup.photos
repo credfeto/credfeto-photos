@@ -1,0 +1,4 @@
+#! /bin/sh
+
+[ -f /backup/phone/.remote ] && rsync -r -P  /data/photos/ /backup/phone/data/
+

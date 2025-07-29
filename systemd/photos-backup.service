@@ -1,0 +1,7 @@
+[Unit]
+Description=Photos Backup
+
+[Service]
+Type=simple
+Restart=always
+ExecStart=/home/markr/work/personal/credfeto-photos/systemd/backup.photos

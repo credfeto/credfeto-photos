@@ -1,0 +1,10 @@
+[Unit]
+Description=Photos Backup
+
+[Timer]
+OnCalendar=*-*-* *:*/5:00
+Persistent=true
+Unit=photos-backup.service
+
+[Install]
+WantedBy=multi-user.target
