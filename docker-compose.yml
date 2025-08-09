@@ -102,4 +102,15 @@ services:
 #        condition: service_started
 
 volumes:
+  photo-data:
+    name: immich-photo-data
+    external: true
+
+  database-data:
+    name: immich-database-data
+    external: true
+
   model-cache:
+    name: immich-model-cache
+    external: true
+

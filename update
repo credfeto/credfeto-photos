@@ -11,4 +11,30 @@ git pull
 
 [ -f "$BASEDIR/.env" ] || die "Missing .env"
 
+
+[ -d "/data/photos/library" ] || sudo mkdir -p /data/photos/library
+[ -d "/data/photos/db" ] || sudo mkdir -p /data/photos/db
+[ -d "/data/photos/models" ] || sudo mkdir -p /data/photos/models
+
+
+sudo docker volume create \
+  --opt type=none \
+  --opt o=bind \
+  --opt device=/data/photos/library \
+  immich-photo-data
+
+
+sudo docker volume create \
+  --opt type=none \
+  --opt o=bind \
+  --opt device=/data/photos/db \
+  immich-database-data
+
+
+sudo docker volume create \
+  --opt type=none \
+  --opt o=bind \
+  --opt device=/data/photos/models \
+  immich-model-cache
+
 sudo docker compose pull && sudo docker compose up -d
