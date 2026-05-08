@@ -3,19 +3,6 @@ extends: default
 rules:
   document-start: disable
   line-length:
-    max: 200
+    max: 160
   truthy:
-    allowed-values: ["true", "false", "on", "True", "False"]
-  comments:
-    min-spaces-from-content: 1
-  comments-indentation: false
-  braces:
-    max-spaces-inside: 1
-  octal-values:
-    forbid-implicit-octal: true
-    forbid-explicit-octal: true
-  indentation: disable
-  empty-lines:
-    max: 2
-    max-start: 0
-    max-end: 0
+    allowed-values: ["true", "false", "on"]
