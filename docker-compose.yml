@@ -128,4 +128,3 @@ volumes:
   model-cache:
     name: immich-model-cache
     external: true
-
