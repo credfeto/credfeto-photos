@@ -1,0 +1,85 @@
+--- # Create a new branch for anything that has a changelog entry, but no branch
+name: "Repo: Create missing releases"
+on:
+  push:
+    branches:
+      - "main"
+    paths:
+      - ".github/workflows/missing-releases.yml"
+      - "CHANGELOG.md"
+  schedule:
+    - cron: "0 1 * * *"
+
+concurrency:
+  group: ${{github.workflow}}-${{github.ref}}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  missing-releases:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Check Required Secrets"
+        shell: bash
+        run: |
+          if [ -z "${{secrets.SOURCE_PUSH_TOKEN}}" ]; then
+            echo "::error::SOURCE_PUSH_TOKEN is required but not set"
+            exit 1
+          fi
+
+      - name: "Initialise Workspace"
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: sudo chown -R "$USER:$USER" "$GITHUB_WORKSPACE"
+
+      - name: "Set Active Environment"
+        shell: bash
+        run: |
+          {
+          echo "ACTIVE_RUNNER_NAME=${{runner.name}}"
+          echo "ACTIVE_HOSTNAME=$HOSTNAME"
+          echo "ACTIVE_USER=$USER"
+          } >> "$GITHUB_ENV"
+
+      - name: "Check for missing releases"
+        uses: actions/github-script@v9.0.0
+        with:
+          github-token: ${{secrets.SOURCE_PUSH_TOKEN}}
+          script: |
+            const { data: releaseBranches } = await octokit.rest.git.listMatchingRefs({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'heads/release/',
+            });
+            const existingReleases = new Set(
+              releaseBranches.map(b => b.ref.replace('refs/heads/release/', ''))
+            );
+            const commits = await octokit.paginate(octokit.rest.repos.listCommits, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: 'main',
+              per_page: 100,
+            });
+            const REGEX_CHANGELOG = /Changelog\sfor\s(\d+\.\d+\.\d+)$/;
+            for (const commit of commits) {
+              const subject = commit.commit.message.split('\n')[0];
+              const match = subject.match(REGEX_CHANGELOG);
+              if (!match) continue;
+              const version = match[1];
+              if (existingReleases.has(version)) {
+                core.info(`* Found Release ${version} at ${commit.sha}`);
+                continue;
+              }
+              core.info(`- Missing Release ${version} at ${commit.sha} - creating branch`);
+              await octokit.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `refs/heads/release/${version}`,
+                sha: commit.sha,
+              });
+              existingReleases.add(version);
+              core.info(`+++ Created branch release/${version}`);
+            }
