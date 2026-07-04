@@ -38,7 +38,7 @@ services:
       - database
     restart: always
     healthcheck:
-      disable: false
+      disable: true
 
   immich-machine-learning:
     container_name: immich_machine_learning
