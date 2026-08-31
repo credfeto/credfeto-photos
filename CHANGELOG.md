@@ -15,6 +15,7 @@ Please ADD ALL Changes to the UNRELEASED SECTION and not a specific release
 - Added .ai-instructions and ai/local/index.md from cs-template standard
 ### Fixed
 ### Changed
+- Enabled immich-server healthcheck, matching upstream's v3.0.0 docker-compose.yml
 ### Deprecated
 ### Removed
 ### Deployment Changes
