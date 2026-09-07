@@ -1,4 +1,4 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to this project are documented in this file.
 
@@ -18,6 +18,7 @@ Please ADD ALL Changes to the UNRELEASED SECTION and not a specific release
 - Enabled immich-server healthcheck, matching upstream's v3.0.0 docker-compose.yml
 ### Deprecated
 ### Removed
+- Removed certs/photos.local.pfx (cert/key bundle) from git tracking; it matched the repo's ignore rules and should never have been committed
 ### Deployment Changes
 
 <!--
