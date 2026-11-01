@@ -16,6 +16,7 @@ Please ADD ALL Changes to the UNRELEASED SECTION and not a specific release
 ### Fixed
 ### Changed
 - Enabled immich-server healthcheck, matching upstream's v3.0.0 docker-compose.yml
+- Watchtower now cleans up old images and uses an overridable WATCHTOWER_SCHEDULE (default 0 48 * * * *) instead of a poll interval
 ### Deprecated
 ### Removed
 ### Deployment Changes
