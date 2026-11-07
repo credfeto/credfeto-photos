@@ -1,4 +1,4 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to this project are documented in this file.
 
@@ -19,6 +19,7 @@ Please ADD ALL Changes to the UNRELEASED SECTION and not a specific release
 - Watchtower now cleans up old images and uses an overridable WATCHTOWER_SCHEDULE (default 0 48 * * * *) instead of a poll interval
 ### Deprecated
 ### Removed
+- Removed certs/photos.local.pfx (cert/key bundle) from git tracking; it matched the repo's ignore rules and should never have been committed
 ### Deployment Changes
 
 <!--
