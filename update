@@ -38,3 +38,9 @@ sudo docker volume create \
   immich-model-cache
 
 sudo docker compose pull && sudo docker compose up -d
+
+# Ingress/egress lockdown (nftables + firewalld policies); observation mode
+# unless PHOTOS_FIREWALL_ENFORCE=true in .env. Runs after the containers
+# exist, because Docker creates the docker zone the policies refer to. See
+# README.md, "Host firewall".
+sudo "$BASEDIR/firewall/configure" || die "Failed to configure the host firewall"

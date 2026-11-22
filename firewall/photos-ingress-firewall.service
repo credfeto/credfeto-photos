@@ -1,0 +1,15 @@
+[Unit]
+Description=Ingress filter for the photos host's published container ports
+# Load before Docker starts publishing ports, so there is no unfiltered window.
+Before=docker.service
+Wants=network-pre.target
+After=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nft -f /etc/credfeto-photos/ingress.nft
+ExecStop=/usr/bin/nft delete table inet pho_ingress
+
+[Install]
+WantedBy=multi-user.target

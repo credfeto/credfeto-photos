@@ -1,0 +1,298 @@
+#!/bin/sh
+
+# Locks the photos (Immich) host's firewall down for ingress and egress.
+# Called by ../update as root.
+#
+# Ingress to the published container port: an nftables table of its own,
+# pho_ingress (ingress.nft.template, loaded by photos-ingress-firewall
+# .service): only the reverse proxies may reach Immich. firewalld cannot
+# filter it: Docker DNATs published ports itself, and firewalld accepts all
+# DNATed forwarded traffic ("ct status dnat accept") before its policies run.
+# The table matches the ORIGINAL destination port (the published one, 2283),
+# not the container port.
+#
+# Egress, with firewalld policies evaluated before the zones:
+#   pho-egress          HOST -> ANY: what the host itself may connect to.
+#   pho-egress-docker   docker -> public: what the containers may connect to.
+#
+# PHOTOS_FIREWALL_ENFORCE=true in ../.env is the single enforcement knob: the
+# policies' target becomes DROP and the ingress table drops what it does not
+# allow. Otherwise (the default) unmatched traffic still flows and is only
+# logged, with the prefixes "pho-ingress-unmatched: ", "pho-egress-unmatched: "
+# and "pho-egress-docker-unmatched: ". The same rules serve both modes: run in
+# observation mode, check the log for anything legitimate, then enforce.
+#
+# SSH to the host is not handled here: it is the public zone's own rule set,
+# managed by the host's base configuration.
+
+set -eu
+
+die() {
+    printf '\n\033[31m✗\033[0m %s\n' "$*" >&2
+    exit 1
+}
+
+info() {
+    printf '\n\033[32m→\033[0m %s\n' "$*"
+}
+
+[ "$(id -u)" -eq 0 ] || die "must run as root"
+
+# One run at a time: photos-firewall-sync.timer can fire while ./update (or
+# a manual run) is still configuring, and concurrent firewall-cmd changes would
+# trip over each other.
+exec 9> /run/lock/credfeto-photos-firewall.lock
+flock 9
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/../.env"
+
+env_value() {
+    [ -f "${ENV_FILE}" ] || return 0
+    grep -E "^[[:space:]]*$1[[:space:]]*=" "${ENV_FILE}" | tail -n 1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//'
+}
+
+TARGET="CONTINUE"
+INGRESS_ACTION="# observation mode: log only"
+if [ "$(env_value PHOTOS_FIREWALL_ENFORCE)" = "true" ]; then
+    TARGET="DROP"
+    INGRESS_ACTION="drop"
+fi
+
+# The reverse proxies (Traefik): the only callers of Immich (the web UI and
+# the phone apps use photos.markridgwell.com), and the Docker Hub mirror,
+# pacman cache and metrics shipping.
+PROXIES_V4="192.168.150.250 192.168.150.251"
+PROXIES_V6="2a02:8010:61d5:150::250 2a02:8010:61d5:150::251"
+# The fleet's DNS servers.
+DNS_V4="192.168.42.101 192.168.42.102 192.168.42.103 192.168.42.104 192.168.42.105 192.168.42.106"
+DNS_V6="2a02:8010:61d5:42::101 2a02:8010:61d5:42::102 2a02:8010:61d5:42::103 2a02:8010:61d5:42::104 2a02:8010:61d5:42::105 2a02:8010:61d5:42::106"
+# Central logging (journald uploads to VictoriaLogs on monitoring.lan).
+LOGS_V4="192.168.160.134"
+# NTP is the router's address on this host's VLAN, i.e. the default gateway.
+NTP_V4="$(ip -4 route show default | awk '/^default/ {print $3; exit}')"
+[ -n "${NTP_V4}" ] || die "no IPv4 default gateway to use as the NTP server"
+# GitHub Pages / raw content / release assets (Fastly).
+FASTLY="185.199.108.0/22 2606:50c0::/32"
+
+# Dynamic (CDN-fronted) destinations, kept fresh by refresh-egress-ipsets.
+# Keep in sync with DOMAIN_SLUGS there. ghnet and cfnet are the published
+# GitHub and Cloudflare ranges (hash:net).
+# The host pulls images itself (through the mirror, falling back to Docker Hub
+# and ghcr.io directly).
+HOST_SLUGS="github ghnet cfnet chaotic pkgstats archwkd ghcr ghcrpkg dhreg dhauth dhcdn"
+# immich-server checks api.github.com hourly for a new release; the machine
+# learning container downloads its models from Hugging Face (the site, its
+# LFS CDN and the Xet storage bridge) when a model is not in the cache yet;
+# Watchtower checks ghcr.io and Docker Hub for new images.
+CONTAINER_SLUGS="github ghnet cfnet ghcr ghcrpkg dhreg dhauth dhcdn hf hflfs hfxet"
+ALL_SLUGS="github ghnet cfnet chaotic pkgstats archwkd ghcr ghcrpkg dhreg dhauth dhcdn hf hflfs hfxet"
+
+CHANGED=false
+finish() {
+    if [ "${CHANGED}" = "true" ]; then
+        firewall-cmd --reload > /dev/null
+        CHANGED=false
+    fi
+}
+trap 'finish; exit 130' INT HUP TERM
+trap 'finish' EXIT
+
+ensure_policy() {
+    NAME="$1"
+    FROM="$2"
+    TO="$3"
+    if ! firewall-cmd --permanent --info-policy="${NAME}" > /dev/null 2>&1; then
+        firewall-cmd --permanent --new-policy="${NAME}" > /dev/null || die "Failed to create policy ${NAME}"
+        firewall-cmd --permanent --policy="${NAME}" --add-ingress-zone="${FROM}" > /dev/null || die "Failed to set ${NAME} ingress zone"
+        firewall-cmd --permanent --policy="${NAME}" --add-egress-zone="${TO}" > /dev/null || die "Failed to set ${NAME} egress zone"
+        CHANGED=true
+    fi
+    if [ "$(firewall-cmd --permanent --policy="${NAME}" --get-priority)" != "-10" ]; then
+        firewall-cmd --permanent --policy="${NAME}" --set-priority=-10 > /dev/null || die "Failed to set ${NAME} priority"
+        CHANGED=true
+    fi
+    if [ "$(firewall-cmd --permanent --policy="${NAME}" --get-target)" != "${TARGET}" ]; then
+        firewall-cmd --permanent --policy="${NAME}" --set-target="${TARGET}" > /dev/null || die "Failed to set ${NAME} target"
+        CHANGED=true
+    fi
+}
+
+# The policy's current rules, read once per policy (one firewall-cmd query per
+# rule makes every ./update take minutes). firewalld lists a rule exactly as it
+# normalises it, so a rule that is not listed verbatim is checked with
+# --query-rich-rule before being added.
+RULES_POLICY=""
+RULES=""
+ensure_rule() {
+    POLICY="$1"
+    RULE="$2"
+    if [ "${RULES_POLICY}" != "${POLICY}" ]; then
+        RULES="$(firewall-cmd --permanent --policy="${POLICY}" --list-rich-rules)"
+        RULES_POLICY="${POLICY}"
+    fi
+    if printf '%s\n' "${RULES}" | grep -Fqx -- "${RULE}"; then
+        return 0
+    fi
+    if ! firewall-cmd --permanent --policy="${POLICY}" --query-rich-rule="${RULE}" > /dev/null 2>&1; then
+        firewall-cmd --permanent --policy="${POLICY}" --add-rich-rule="${RULE}" > /dev/null || die "Failed to add ${POLICY} rule: ${RULE}"
+        CHANGED=true
+    fi
+}
+
+family_of() {
+    case "$1" in
+        *:*) echo ipv6 ;;
+        *) echo ipv4 ;;
+    esac
+}
+
+# allow_to POLICY PROTO PORT DESTINATION...
+allow_to() {
+    POLICY="$1"
+    PROTO="$2"
+    PORT="$3"
+    shift 3
+    for DST in "$@"; do
+        ensure_rule "${POLICY}" "rule family=\"$(family_of "${DST}")\" destination address=\"${DST}\" port protocol=\"${PROTO}\" port=\"${PORT}\" accept"
+    done
+}
+
+# allow_ipsets POLICY PORT SLUG...: tcp to the v4 and v6 sets of each slug.
+allow_ipsets() {
+    POLICY="$1"
+    PORT="$2"
+    shift 2
+    for SLUG in "$@"; do
+        ensure_rule "${POLICY}" "rule family=\"ipv4\" destination ipset=\"pho-egress-${SLUG}-v4\" port protocol=\"tcp\" port=\"${PORT}\" accept"
+        ensure_rule "${POLICY}" "rule family=\"ipv6\" destination ipset=\"pho-egress-${SLUG}-v6\" port protocol=\"tcp\" port=\"${PORT}\" accept"
+    done
+}
+
+catch_all() {
+    POLICY="$1"
+    for FAMILY in ipv4 ipv6; do
+        ensure_rule "${POLICY}" "rule priority=\"32767\" family=\"${FAMILY}\" log prefix=\"${POLICY}-unmatched: \" level=\"info\" limit value=\"30/m\""
+    done
+}
+
+firewall-cmd --state > /dev/null 2>&1 || die "firewalld is not running"
+info "Configuring firewall (policy target ${TARGET})..."
+
+# --- ipsets (entries are maintained by refresh-egress-ipsets) ---
+EXISTING_IPSETS="$(firewall-cmd --permanent --get-ipsets)"
+IPSET_CREATED=false
+for SLUG in ${ALL_SLUGS}; do
+    TYPE="hash:ip"
+    case "${SLUG}" in
+        ghnet | cfnet) TYPE="hash:net" ;;
+    esac
+    for FAM in v4:inet v6:inet6; do
+        NAME="pho-egress-${SLUG}-${FAM%%:*}"
+        if ! printf '%s\n' "${EXISTING_IPSETS}" | tr ' ' '\n' | grep -qx "${NAME}"; then
+            firewall-cmd --permanent --new-ipset="${NAME}" --type="${TYPE}" --option=family="${FAM#*:}" > /dev/null || die "Failed to create ipset ${NAME}"
+            IPSET_CREATED=true
+            CHANGED=true
+        fi
+    done
+done
+# A new permanent ipset is not a valid rich-rule destination until firewalld
+# reloads (INVALID_IPSET otherwise).
+if [ "${IPSET_CREATED}" = "true" ]; then
+    firewall-cmd --reload > /dev/null
+fi
+
+# --- Egress from the host ---
+ensure_policy pho-egress HOST ANY
+# ICMPv6 is fundamental (NDP, PMTU discovery); IGMP and DHCPv6 are link-local
+# housekeeping.
+ensure_rule pho-egress 'rule family="ipv6" protocol value="ipv6-icmp" accept'
+ensure_rule pho-egress 'rule family="ipv4" protocol value="icmp" accept'
+ensure_rule pho-egress 'rule family="ipv4" protocol value="igmp" accept'
+allow_to pho-egress udp 547 ff02::1:2
+# The host talking to its own containers.
+ensure_rule pho-egress 'rule family="ipv4" destination address="172.16.0.0/12" accept'
+ensure_rule pho-egress 'rule family="ipv6" destination address="fd00::/8" accept'
+for PROTO in udp tcp; do
+    # shellcheck disable=SC2086
+    allow_to pho-egress "${PROTO}" 53 ${DNS_V4} ${DNS_V6}
+done
+allow_to pho-egress udp 123 "${NTP_V4}"
+# Proxies: the Docker Hub mirror (this cache, through Traefik), the pacman
+# cache, metrics shipping (monitoring.markridgwell.com).
+# shellcheck disable=SC2086
+allow_to pho-egress tcp 443 ${PROXIES_V4} ${PROXIES_V6}
+# shellcheck disable=SC2086
+allow_to pho-egress tcp 9428 ${LOGS_V4}
+# shellcheck disable=SC2086
+allow_to pho-egress tcp 443 ${FASTLY}
+# shellcheck disable=SC2086
+allow_ipsets pho-egress 443 ${HOST_SLUGS}
+catch_all pho-egress
+
+# --- Egress from the containers ---
+ensure_policy pho-egress-docker docker public
+for PROTO in udp tcp; do
+    # shellcheck disable=SC2086
+    allow_to pho-egress-docker "${PROTO}" 53 ${DNS_V4} ${DNS_V6}
+done
+# shellcheck disable=SC2086
+allow_to pho-egress-docker tcp 443 ${PROXIES_V4} ${PROXIES_V6}
+# shellcheck disable=SC2086
+allow_to pho-egress-docker tcp 443 ${FASTLY}
+# shellcheck disable=SC2086
+allow_ipsets pho-egress-docker 443 ${CONTAINER_SLUGS}
+catch_all pho-egress-docker
+
+finish
+
+# --- Ingress to the published container port (nftables) ---
+install -d -m 755 /etc/credfeto-photos
+nft_list() {
+    printf '%s' "$*" | sed 's/ /, /g'
+}
+# The address lists are deliberately unquoted: nft_list joins its arguments.
+# shellcheck disable=SC2086
+sed -e "s|@INGRESS_ACTION@|${INGRESS_ACTION}|" \
+    -e "s|@PROXIES4@|$(nft_list ${PROXIES_V4})|" \
+    -e "s|@PROXIES6@|$(nft_list ${PROXIES_V6})|" \
+    "${SCRIPT_DIR}/ingress.nft.template" > /etc/credfeto-photos/ingress.nft.new
+nft -c -f /etc/credfeto-photos/ingress.nft.new || die "ingress.nft does not parse"
+mv /etc/credfeto-photos/ingress.nft.new /etc/credfeto-photos/ingress.nft
+install -m 644 "${SCRIPT_DIR}/photos-ingress-firewall.service" /etc/systemd/system/photos-ingress-firewall.service
+
+# --- ipset refresh timer ---
+install -m 755 "${SCRIPT_DIR}/refresh-egress-ipsets" /usr/local/bin/photos-refresh-egress-ipsets
+install -d -m 755 /usr/local/share/credfeto-photos
+install -m 644 "${SCRIPT_DIR}/github-egress-ranges" /usr/local/share/credfeto-photos/github-egress-ranges
+install -m 644 "${SCRIPT_DIR}/cloudflare-egress-ranges" /usr/local/share/credfeto-photos/cloudflare-egress-ranges
+install -m 644 "${SCRIPT_DIR}/photos-egress-refresh.service" /etc/systemd/system/photos-egress-refresh.service
+install -m 644 "${SCRIPT_DIR}/photos-egress-refresh.timer" /etc/systemd/system/photos-egress-refresh.timer
+
+# --- Keep the firewall in step with the repo (like sync-zones on the DNS
+# servers): firewall/sync pulls and re-runs this script when the firewall
+# config changes, e.g. the daily egress-ranges commit. A symlink, so the script
+# finds the checkout it lives in.
+ln -sfn "${SCRIPT_DIR}/sync" /usr/local/sbin/photos-firewall-sync
+install -m 644 "${SCRIPT_DIR}/photos-firewall-sync.service" /etc/systemd/system/photos-firewall-sync.service
+install -m 644 "${SCRIPT_DIR}/photos-firewall-sync.timer" /etc/systemd/system/photos-firewall-sync.timer
+
+systemctl daemon-reload
+systemctl enable photos-ingress-firewall.service > /dev/null 2>&1
+# restart re-loads the table atomically (the file deletes and recreates it).
+systemctl restart photos-ingress-firewall.service || die "Failed to load the ingress firewall"
+for UNIT in photos-egress-refresh.timer photos-firewall-sync.timer; do
+    systemctl enable "${UNIT}" > /dev/null 2>&1
+    # restart, not just enable --now: an already-active timer keeps its old
+    # schedule otherwise.
+    systemctl restart "${UNIT}"
+done
+# Populate the ipsets now rather than at the timer's first run.
+/usr/local/bin/photos-refresh-egress-ipsets
+
+# Record the commit whose firewall config is now live; firewall/sync compares
+# against it. Keep the path in sync with firewall/sync.
+install -d -m 755 /var/lib/credfeto-photos
+git -C "${SCRIPT_DIR}" rev-parse HEAD > /var/lib/credfeto-photos/firewall-applied-head
+
+info "Firewall configured (policy target ${TARGET})."

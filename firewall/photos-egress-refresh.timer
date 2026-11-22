@@ -1,0 +1,15 @@
+[Unit]
+Description=Periodically refresh the photos host's dynamic egress firewalld ipsets
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+# Wall-clock trigger as well: the monotonic triggers above never re-arm if the
+# boot trigger is missed (e.g. the units are rewritten after boot).
+OnCalendar=*:0/10
+RandomizedDelaySec=1min
+AccuracySec=1s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

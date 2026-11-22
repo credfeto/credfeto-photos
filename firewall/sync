@@ -1,0 +1,55 @@
+#!/bin/sh
+
+# Keeps the photos host's firewall in step with the repo between manual
+# ./update runs, like sync-zones on the DNS servers: refreshes the egress
+# ipsets, pulls the checkout, and re-runs ./configure when anything under
+# firewall/ changed since the commit ./configure last applied (for example
+# the daily egress-ranges commit). It does not run the full ../update:
+# container and compose changes still wait for that.
+#
+# Runs as root via photos-firewall-sync.timer, which ./configure installs.
+
+set -eu
+
+die() {
+    echo "firewall-sync: $*" >&2
+    exit 1
+}
+
+[ "$(id -u)" -eq 0 ] || die "must run as root"
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+REPO_DIR="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)"
+# Keep in sync with ./configure.
+APPLIED_HEAD_FILE="/var/lib/credfeto-photos/firewall-applied-head"
+FIREWALL_PATH="firewall"
+
+# Refresh the ipsets BEFORE the pull: the pull itself needs github.com, whose
+# address rotates often, so a stale set would block the fetch that keeps this
+# host current. A failed refresh is only a warning; the pull reports the real
+# outcome.
+if [ -x /usr/local/bin/photos-refresh-egress-ipsets ]; then
+    /usr/local/bin/photos-refresh-egress-ipsets || echo "firewall-sync: warning: egress ipset refresh failed" >&2
+fi
+
+git -C "${REPO_DIR}" pull --ff-only || die "git pull failed; will retry on the next run"
+
+HEAD="$(git -C "${REPO_DIR}" rev-parse HEAD)"
+APPLIED="$(cat "${APPLIED_HEAD_FILE}" 2> /dev/null || true)"
+
+if [ -n "${APPLIED}" ] && git -C "${REPO_DIR}" cat-file -e "${APPLIED}^{commit}" 2> /dev/null; then
+    [ "${APPLIED}" != "${HEAD}" ] || exit 0
+    CHANGED="$(git -C "${REPO_DIR}" diff --name-only "${APPLIED}..${HEAD}" -- "${FIREWALL_PATH}")"
+    if [ -z "${CHANGED}" ]; then
+        # Nothing firewall-related: move the record on so later diffs stay short.
+        printf '%s\n' "${HEAD}" > "${APPLIED_HEAD_FILE}"
+        exit 0
+    fi
+    echo "firewall-sync: firewall config changed since ${APPLIED}:"
+    # shellcheck disable=SC2086 # CHANGED is a word list
+    printf '  %s\n' ${CHANGED}
+else
+    echo "firewall-sync: no applied-commit record; applying the firewall config"
+fi
+
+"${SCRIPT_DIR}/configure" || die "configure failed; will retry on the next run"

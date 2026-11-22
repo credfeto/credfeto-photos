@@ -11,6 +11,7 @@ Please ADD ALL Changes to the UNRELEASED SECTION and not a specific release
 
 ## [Unreleased]
 ### Security
+- Host firewall lockdown for ingress and egress (`firewall/configure`, run by `update`): an nftables table lets only the reverse proxies reach the published Immich port, and firewalld policies limit what the host and the containers may connect to, with CDN-fronted destinations kept in ipsets refreshed every 10 minutes. `photos-firewall-sync.timer` re-applies it when the firewall config changes, and the daily `Repo: Update egress ranges` workflow refreshes the GitHub and Cloudflare ranges. Observation mode (log unmatched traffic, drop nothing) until `PHOTOS_FIREWALL_ENFORCE=true`
 ### Added
 - Added .ai-instructions and ai/local/index.md from cs-template standard
 ### Fixed
