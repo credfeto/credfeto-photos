@@ -42,7 +42,7 @@ RANGES_DIR = "/usr/local/share/credfeto-photos"
 
 # The reverse proxies (Traefik): the Docker Hub mirror, the pacman cache and
 # metrics shipping.
-PROXIES = ["192.168.150.250", "192.168.150.251", "192.168.140.250", "192.168.140.251", "2a02:8010:61d5:150::250", "2a02:8010:61d5:150::251", "2a02:8010:61d5:140::250", "2a02:8010:61d5:140::251"]
+PROXIES = ["192.168.140.250", "192.168.140.251", "2a02:8010:61d5:140::250", "2a02:8010:61d5:140::251"]
 # The fleet's DNS servers.
 DNS = [f"192.168.42.10{n}" for n in range(1, 7)] + [f"2a02:8010:61d5:42::10{n}" for n in range(1, 7)]
 # Central logging (journald uploads to VictoriaLogs on monitoring.lan).

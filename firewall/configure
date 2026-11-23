@@ -64,8 +64,8 @@ fi
 # The reverse proxies (Traefik): the only callers of Immich (the web UI and
 # the phone apps use photos.markridgwell.com). Keep in sync with PROXIES in
 # firewall/egress.
-PROXIES_V4="192.168.150.250 192.168.150.251 192.168.140.250 192.168.140.251"
-PROXIES_V6="2a02:8010:61d5:150::250 2a02:8010:61d5:150::251 2a02:8010:61d5:140::250 2a02:8010:61d5:140::251"
+PROXIES_V4="192.168.140.250 192.168.140.251"
+PROXIES_V6="2a02:8010:61d5:140::250 2a02:8010:61d5:140::251"
 
 # --- Retire the firewalld policies and ipsets an earlier version used. Their
 # refresh reloaded firewalld every 10 minutes, and a firewalld killed

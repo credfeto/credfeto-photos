@@ -11,6 +11,7 @@ Please ADD ALL Changes to the UNRELEASED SECTION and not a specific release
 
 ## [Unreleased]
 ### Security
+- Firewall: the reverse proxies' Servers VLAN addresses (`192.168.150.250`, `192.168.150.251`, `2a02:8010:61d5:150::250`, `2a02:8010:61d5:150::251`) are no longer allowed; proxy-01/proxy-02 are only reached on their DMZ VLAN addresses
 - Firewall: the reverse proxies' DMZ VLAN addresses (`192.168.140.250`, `192.168.140.251`, `2a02:8010:61d5:140::250`, `2a02:8010:61d5:140::251`) are allowed alongside their Servers VLAN addresses, so proxy-01/proxy-02 can move to the DMZ one at a time without losing access
 - Host firewall lockdown for ingress and egress (`firewall/configure`, run by `update`): an nftables table lets only the reverse proxies reach the published Immich port, and firewalld policies limit what the host and the containers may connect to, with CDN-fronted destinations kept in ipsets refreshed every 10 minutes. `photos-firewall-sync.timer` re-applies it when the firewall config changes, and the daily `Repo: Update egress ranges` workflow refreshes the GitHub and Cloudflare ranges. Observation mode (log unmatched traffic, drop nothing) until `PHOTOS_FIREWALL_ENFORCE=true`
 ### Added
