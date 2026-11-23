@@ -1,11 +1,11 @@
 [Unit]
-Description=Refresh the photos host's dynamic egress firewalld ipsets
+Description=Refresh and load the photos host's egress nftables table
 Wants=network-online.target
-After=network-online.target firewalld.service
+After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/photos-refresh-egress-ipsets
+ExecStart=/usr/local/bin/photos-egress
 ProtectSystem=full
 ProtectHome=true
 NoNewPrivileges=true

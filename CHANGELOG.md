@@ -19,6 +19,7 @@ Please ADD ALL Changes to the UNRELEASED SECTION and not a specific release
 ### Changed
 - Enabled immich-server healthcheck, matching upstream's v3.0.0 docker-compose.yml
 - Watchtower now cleans up old images and uses an overridable WATCHTOWER_SCHEDULE (default 0 48 * * * *) instead of a poll interval
+- The host egress firewall is now one nftables table (`inet pho_egress`) loaded atomically by `firewall/egress`, instead of firewalld policies and ipsets: the 10-minute refresh reloaded firewalld, and a firewalld killed mid-reload (by the OOM killer) left its block-everything table in place and cut the host off. `firewall/configure` removes the old policies and ipsets with one last reload
 ### Deprecated
 ### Removed
 ### Deployment Changes

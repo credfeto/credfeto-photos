@@ -2,7 +2,7 @@
 
 # Keeps the photos host's firewall in step with the repo between manual
 # ./update runs, like sync-zones on the DNS servers: refreshes the egress
-# ipsets, pulls the checkout, and re-runs ./configure when anything under
+# table, pulls the checkout, and re-runs ./configure when anything under
 # firewall/ changed since the commit ./configure last applied (for example
 # the daily egress-ranges commit). It does not run the full ../update:
 # container and compose changes still wait for that.
@@ -24,12 +24,12 @@ REPO_DIR="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)"
 APPLIED_HEAD_FILE="/var/lib/credfeto-photos/firewall-applied-head"
 FIREWALL_PATH="firewall"
 
-# Refresh the ipsets BEFORE the pull: the pull itself needs github.com, whose
+# Refresh the table BEFORE the pull: the pull itself needs github.com, whose
 # address rotates often, so a stale set would block the fetch that keeps this
 # host current. A failed refresh is only a warning; the pull reports the real
 # outcome.
-if [ -x /usr/local/bin/photos-refresh-egress-ipsets ]; then
-    /usr/local/bin/photos-refresh-egress-ipsets || echo "firewall-sync: warning: egress ipset refresh failed" >&2
+if [ -x /usr/local/bin/photos-egress ]; then
+    /usr/local/bin/photos-egress || echo "firewall-sync: warning: egress refresh failed" >&2
 fi
 
 git -C "${REPO_DIR}" pull --ff-only || die "git pull failed; will retry on the next run"

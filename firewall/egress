@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""Builds and loads the photos (Immich) host's egress firewall as one nftables table.
+
+The table is `inet pho_egress`, with two base chains:
+  host_out    hook output:  what the host itself may connect to.
+  docker_fwd  hook forward: what the containers may connect to.
+
+It is a table of its own, not firewalld policies: the whole ruleset, including
+the address sets, is replaced in a single `nft -f` transaction. So a refresh
+never makes firewalld reload, and a failed load leaves the previous rules in
+place. firewalld keeps the base zones (SSH and so on) and never sees this
+table.
+
+Runs as root from photos-egress-refresh.timer (every 10 minutes), from
+firewall/configure (which ../update runs) and from firewall/sync. Each run:
+  * resolves the CDN-fronted names (falling back to the last good answer for
+    a name that does not resolve right now),
+  * reads the published GitHub and Cloudflare ranges,
+  * renders the table and loads it only if it differs from what is loaded.
+
+Enforcement comes from ENFORCE_FILE, which firewall/configure writes from
+PHOTOS_FIREWALL_ENFORCE in ../.env: "true" drops unmatched new connections;
+anything else only logs them ("pho-egress-unmatched: " and
+"pho-egress-docker-unmatched: ", 30 a minute) and lets them through.
+"""
+
+import ipaddress
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+
+TABLE = "pho_egress"
+PREFIX = "pho-egress"
+STATE_DIR = "/var/lib/credfeto-photos"
+ENFORCE_FILE = os.path.join(STATE_DIR, "egress-enforce")
+CACHE_FILE = os.path.join(STATE_DIR, "egress-resolved.json")
+LOADED_FILE = os.path.join(STATE_DIR, "egress.nft")
+RANGES_DIR = "/usr/local/share/credfeto-photos"
+
+# The reverse proxies (Traefik): the Docker Hub mirror, the pacman cache and
+# metrics shipping.
+PROXIES = ["192.168.150.250", "192.168.150.251", "2a02:8010:61d5:150::250", "2a02:8010:61d5:150::251"]
+# The fleet's DNS servers.
+DNS = [f"192.168.42.10{n}" for n in range(1, 7)] + [f"2a02:8010:61d5:42::10{n}" for n in range(1, 7)]
+# Central logging (journald uploads to VictoriaLogs on monitoring.lan).
+LOGS = ["192.168.160.134"]
+# GitHub Pages / raw content / release assets (Fastly).
+FASTLY = ["185.199.108.0/22", "2606:50c0::/32"]
+
+# Names without a stable address, resolved on every run. slug -> name.
+DOMAINS = {
+    "github": "github.com",
+    "chaotic": "cdn-mirror.chaotic.cx",
+    "pkgstats": "pkgstats.archlinux.de",
+    "archwkd": "openpgpkey.archlinux.org",
+    "ghcr": "ghcr.io",
+    "ghcrpkg": "pkg-containers.githubusercontent.com",
+    "dhreg": "registry-1.docker.io",
+    "dhauth": "auth.docker.io",
+    "dhcdn": "production.cloudflare.docker.com",
+    "hf": "huggingface.co",
+    "hflfs": "cdn-lfs.hf.co",
+    "hfxet": "cas-bridge.xethub.hf.co",
+}
+# Published ranges, shipped in the repo and regenerated daily by the
+# "Repo: Update egress ranges" workflow. slug -> file in RANGES_DIR.
+RANGES = {
+    "ghnet": "github-egress-ranges",
+    "cfnet": "cloudflare-egress-ranges",
+}
+
+# The host pulls images itself (through the mirror, falling back to Docker Hub
+# and ghcr.io directly).
+HOST_HTTPS_SETS = ["github", "ghnet", "cfnet", "chaotic", "pkgstats", "archwkd", "ghcr", "ghcrpkg", "dhreg", "dhauth", "dhcdn"]
+# immich-server checks api.github.com hourly for a new release; the machine
+# learning container downloads its models from Hugging Face (the site, its
+# LFS CDN and the Xet storage bridge) when a model is not in the cache yet;
+# Watchtower checks ghcr.io and Docker Hub for new images.
+CONTAINER_HTTPS_SETS = ["github", "ghnet", "cfnet", "ghcr", "ghcrpkg", "dhreg", "dhauth", "dhcdn", "hf", "hflfs", "hfxet"]
+
+NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def log(msg):
+    print(f"egress: {msg}", file=sys.stderr)
+
+
+def nat64(v4net):
+    """The NAT64 (RFC 6052 well-known prefix) form of an IPv4 network: this
+    network runs DNS64, so IPv6-preferring clients reach IPv4-only hosts that
+    way."""
+    base = int(NAT64.network_address) + int(v4net.network_address)
+    return ipaddress.ip_network((base, 96 + v4net.prefixlen))
+
+
+def split(nets):
+    """IPv4 and IPv6 networks, the IPv6 side including the NAT64 form of every
+    IPv4 network, each collapsed so overlapping entries cannot make nft reject
+    the set."""
+    v4 = [n for n in nets if n.version == 4]
+    v6 = [n for n in nets if n.version == 6 and n not in NAT64 and not n.subnet_of(NAT64)]
+    v6 += [nat64(n) for n in v4]
+    return list(ipaddress.collapse_addresses(v4)), list(ipaddress.collapse_addresses(v6))
+
+
+def resolve(name):
+    infos = socket.getaddrinfo(name, 443, proto=socket.IPPROTO_TCP)
+    return sorted({info[4][0] for info in infos})
+
+
+def load_cache():
+    try:
+        with open(CACHE_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def read_ranges(path):
+    nets = []
+    with open(path) as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                nets.append(ipaddress.ip_network(line, strict=False))
+    return nets
+
+
+def gather_sets():
+    """slug -> (v4 networks, v6 networks)."""
+    cache = load_cache()
+    resolved = {}
+    sets = {}
+    for slug, name in DOMAINS.items():
+        try:
+            addrs = resolve(name)
+        except OSError as e:
+            addrs = cache.get(slug, [])
+            log(f"{name} did not resolve ({e}); keeping the {len(addrs)} cached address(es)")
+        resolved[slug] = addrs
+        # Resolver-supplied 64:ff9b:: answers are dropped by split() and
+        # recomputed from the IPv4 answers, so DNS64 state cannot make the
+        # sets flap between runs.
+        sets[slug] = split([ipaddress.ip_network(a) for a in addrs])
+    for slug, filename in RANGES.items():
+        path = os.path.join(RANGES_DIR, filename)
+        try:
+            sets[slug] = split(read_ranges(path))
+        except OSError as e:
+            log(f"{path} unreadable ({e}); {slug} is empty")
+            sets[slug] = ([], [])
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = CACHE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(resolved, f, indent=1, sort_keys=True)
+    os.replace(tmp, CACHE_FILE)
+    return sets
+
+
+def default_gateways():
+    gws = []
+    for fam in ("-4", "-6"):
+        out = subprocess.run(["ip", fam, "route", "show", "default"], capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            words = line.split()
+            if len(words) > 2 and words[0] == "default" and words[1] == "via" and not words[2].startswith("fe80:"):
+                gws.append(words[2])
+    if not gws:
+        log("no default gateway; NTP to the router is not allowed")
+    return gws
+
+
+def addr_rules(addrs, match):
+    """One rule per family for a static list of addresses or networks."""
+    nets = [ipaddress.ip_network(a, strict=False) for a in addrs]
+    rules = []
+    for fam, kw in ((4, "ip"), (6, "ip6")):
+        fam_nets = [str(n) for n in nets if n.version == fam]
+        if fam_nets:
+            rules.append(f"{kw} daddr {{ {', '.join(fam_nets)} }} {match} accept")
+    return rules
+
+
+def set_rules(slugs, sets, match):
+    rules = []
+    for slug in slugs:
+        v4, v6 = sets[slug]
+        if v4:
+            rules.append(f"ip daddr @{slug}_v4 {match} accept")
+        if v6:
+            rules.append(f"ip6 daddr @{slug}_v6 {match} accept")
+    return rules
+
+
+def chain(name, hook, pre, allows, log_prefix, enforce):
+    lines = [
+        f"\tchain {name} {{",
+        f"\t\ttype filter hook {hook} priority filter - 10; policy accept;",
+        # Replies to accepted connections, including inbound SSH and anything
+        # the host's zones let in.
+        "\t\tct state established,related accept",
+        "\t\tct state invalid drop" if enforce else "",
+    ]
+    lines += [f"\t\t{r}" for r in pre + allows]
+    lines.append(f'\t\tlimit rate 30/minute log prefix "{log_prefix}: " level info')
+    if enforce:
+        lines.append("\t\tdrop")
+    lines.append("\t}")
+    return [l for l in lines if l]
+
+
+def render(sets, enforce):
+    out = [f"table inet {TABLE}", f"delete table inet {TABLE}", f"table inet {TABLE} {{"]
+    for slug, (v4, v6) in sorted(sets.items()):
+        for suffix, kind, nets in (("v4", "ipv4_addr", v4), ("v6", "ipv6_addr", v6)):
+            if not nets:
+                continue
+            out.append(f"\tset {slug}_{suffix} {{")
+            out.append(f"\t\ttype {kind}; flags interval;")
+            out.append(f"\t\telements = {{ {', '.join(str(n) for n in nets)} }}")
+            out.append("\t}")
+
+    dns = "meta l4proto { tcp, udp } th dport 53"
+    host_allows = [
+        # ICMPv6 is fundamental (NDP, PMTU discovery); IGMP, DHCP and DHCPv6
+        # are link-local housekeeping.
+        "meta l4proto ipv6-icmp accept",
+        "meta l4proto { icmp, igmp } accept",
+        "udp dport { 67, 547 } accept",
+        # The host talking to its own containers.
+        "ip daddr 172.16.0.0/12 accept",
+        "ip6 daddr fd00::/8 accept",
+    ]
+    # NTP: the router's address on this host's VLAN (the default gateway).
+    host_allows += addr_rules(default_gateways(), "udp dport 123")
+    host_allows += addr_rules(DNS, dns)
+    # The proxies (the Docker Hub mirror, the pacman cache, metrics shipping)
+    # and GitHub's Fastly ranges.
+    host_allows += addr_rules(PROXIES + FASTLY, "tcp dport 443")
+    host_allows += addr_rules(LOGS, "tcp dport 9428")
+    host_allows += set_rules(HOST_HTTPS_SETS, sets, "tcp dport 443")
+    out += chain("host_out", "output", ['oifname "lo" accept'], host_allows, f"{PREFIX}-unmatched", enforce)
+
+    # Only traffic from the Docker bridges to somewhere else; everything else
+    # in the forward hook is left to firewalld.
+    docker_pre = [
+        'iifname != "docker0" iifname != "br-*" accept',
+        'oifname "docker0" accept',
+        'oifname "br-*" accept',
+    ]
+    container_allows = addr_rules(DNS, dns)
+    container_allows += addr_rules(PROXIES + FASTLY, "tcp dport 443")
+    container_allows += set_rules(CONTAINER_HTTPS_SETS, sets, "tcp dport 443")
+    out += chain("docker_fwd", "forward", docker_pre, container_allows, f"{PREFIX}-docker-unmatched", enforce)
+    out.append("}")
+    return "\n".join(out) + "\n"
+
+
+def loaded():
+    try:
+        with open(LOADED_FILE) as f:
+            text = f.read()
+    except OSError:
+        return None
+    # The table can be gone even though the file is current (after a reboot,
+    # or someone flushing the ruleset).
+    if subprocess.run(["nft", "list", "table", "inet", TABLE], capture_output=True).returncode != 0:
+        return None
+    return text
+
+
+def main():
+    if os.geteuid() != 0:
+        sys.exit("egress: must run as root")
+    try:
+        with open(ENFORCE_FILE) as f:
+            enforce = f.read().strip() == "true"
+    except OSError:
+        enforce = False
+    text = render(gather_sets(), enforce)
+    if text == loaded():
+        return
+    fd, path = tempfile.mkstemp(dir=STATE_DIR, suffix=".nft")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    # Check first, so a bad ruleset never touches the loaded one; the load
+    # itself is one transaction as well.
+    check = subprocess.run(["nft", "-c", "-f", path], capture_output=True, text=True)
+    if check.returncode != 0:
+        os.unlink(path)
+        sys.exit(f"egress: ruleset rejected, previous one left in place:\n{check.stderr}")
+    load = subprocess.run(["nft", "-f", path], capture_output=True, text=True)
+    if load.returncode != 0:
+        os.unlink(path)
+        sys.exit(f"egress: load failed, previous ruleset left in place:\n{load.stderr}")
+    os.replace(path, LOADED_FILE)
+    log(f"loaded table inet {TABLE} ({'enforcing' if enforce else 'observation mode'})")
+
+
+if __name__ == "__main__":
+    main()

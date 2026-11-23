@@ -1,8 +1,8 @@
 [Unit]
-Description=Periodically refresh the photos host's dynamic egress firewalld ipsets
+Description=Periodically refresh the photos host's egress nftables table
 
 [Timer]
-OnBootSec=2min
+OnBootSec=30s
 OnUnitActiveSec=10min
 # Wall-clock trigger as well: the monotonic triggers above never re-arm if the
 # boot trigger is missed (e.g. the units are rewritten after boot).

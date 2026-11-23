@@ -1,7 +1,7 @@
 [Unit]
 Description=Pull the photos host repo and re-apply the host firewall when it changed
 Wants=network-online.target
-After=network-online.target firewalld.service
+After=network-online.target
 
 [Service]
 Type=oneshot
